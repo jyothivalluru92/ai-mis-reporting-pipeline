@@ -1,0 +1,377 @@
+{
+  "name": "AI-Powered MIS Reporting & Anomaly Detection Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        16
+      ],
+      "id": "1f382ba4-2297-4112-9d2b-4a75b9a59ea9",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "superstore_sales",
+          "mode": "list",
+          "cachedResultName": "superstore_sales"
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -240,
+        -112
+      ],
+      "id": "6323cf75-c115-440e-af8f-7db99c54d7f5",
+      "name": "Fetch Superstore Data",
+      "credentials": {
+        "postgres": {
+          "id": "vgXolrS5p0W6qb4M",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Weekly KPI & Anomaly Detection (v3 - cleans text fields + robust week selection)\n// Paste this into an n8n Code node connected after \"Fetch Superstore Data\"\n// ============================================================\n\nconst rows = $input.all().map(item => item.json);\n\n// --- Helper: convert an Order Date into a \"Year-Week\" key, e.g. \"2016-W05\" ---\nfunction getWeekKey(dateStr) {\n  const date = new Date(dateStr);\n  const target = new Date(date.valueOf());\n  const dayNr = (date.getDay() + 6) % 7;\n  target.setDate(target.getDate() - dayNr + 3);\n  const firstThursday = target.valueOf();\n  target.setMonth(0, 1);\n  if (target.getDay() !== 4) {\n    target.setMonth(0, 1 + ((4 - target.getDay()) + 7) % 7);\n  }\n  const weekNumber = 1 + Math.ceil((firstThursday - target) / 604800000);\n  return `${date.getFullYear()}-W${String(weekNumber).padStart(2, '0')}`;\n}\n\n// --- Step 1: Group every row by Region + Week (with cleaned text fields) ---\nconst weeklyData = {};\n\nfor (const row of rows) {\n  // .trim() removes stray leading/trailing spaces that make \"South\" and \"South \" look different\n  const region = (row['Region'] || '').toString().trim();\n  const orderDate = row['Order Date'];\n  const sales = parseFloat(row['Sales']) || 0;\n  const customerId = (row['Customer ID'] || '').toString().trim();\n\n  if (!region || !orderDate) continue;\n\n  const weekKey = getWeekKey(orderDate);\n  const groupKey = `${region}|${weekKey}`;\n\n  if (!weeklyData[groupKey]) {\n    weeklyData[groupKey] = {\n      region,\n      weekKey,\n      totalSales: 0,\n      customers: new Set(),\n      orderCount: 0,\n    };\n  }\n\n  weeklyData[groupKey].totalSales += sales;\n  weeklyData[groupKey].customers.add(customerId);\n  weeklyData[groupKey].orderCount += 1;\n}\n\n// --- Step 2: Flatten into one row per Region+Week ---\nconst weeklyArray = Object.values(weeklyData).map(w => ({\n  region: w.region,\n  weekKey: w.weekKey,\n  totalSales: Math.round(w.totalSales * 100) / 100,\n  uniqueCustomers: w.customers.size,\n  orderCount: w.orderCount,\n}));\n\nconst regions = [...new Set(weeklyArray.map(w => w.region))];\nconst allWeeksDesc = [...new Set(weeklyArray.map(w => w.weekKey))].sort().reverse();\n\n// --- Step 3: Score recent weeks by region coverage, pick the best one ---\nconst weekScores = allWeeksDesc.map(wk => {\n  const weekRows = weeklyArray.filter(w => w.weekKey === wk);\n  const regionsPresent = new Set(weekRows.map(w => w.region));\n  const totalOrders = weekRows.reduce((sum, w) => sum + w.orderCount, 0);\n  return { wk, regionCount: regionsPresent.size, totalOrders };\n});\n\nlet currentWeek;\nconst fullCoverage = weekScores.find(s => s.regionCount === regions.length);\nif (fullCoverage) {\n  currentWeek = fullCoverage.wk;\n} else {\n  const candidates = [...weekScores.slice(0, 10)].sort(\n    (a, b) => b.regionCount - a.regionCount || b.totalOrders - a.totalOrders\n  );\n  currentWeek = candidates[0] ? candidates[0].wk : allWeeksDesc[0];\n}\n\n// --- Step 4: For each Region, compare current week vs trailing baseline ---\nconst results = [];\n\nfor (const region of regions) {\n  const regionWeeks = weeklyArray\n    .filter(w => w.region === region)\n    .sort((a, b) => a.weekKey.localeCompare(b.weekKey));\n\n  const currentWeekData = regionWeeks.find(w => w.weekKey === currentWeek);\n  if (!currentWeekData) continue;\n\n  const baselineWeeks = regionWeeks.filter(w => w.weekKey < currentWeek).slice(-8);\n\n  if (baselineWeeks.length < 3) {\n    results.push({\n      region,\n      weekKey: currentWeek,\n      totalSales: currentWeekData.totalSales,\n      uniqueCustomers: currentWeekData.uniqueCustomers,\n      orderCount: currentWeekData.orderCount,\n      baselineMean: null,\n      zScore: null,\n      isAnomaly: false,\n      note: 'Not enough historical weeks yet for this region',\n    });\n    continue;\n  }\n\n  const baselineSales = baselineWeeks.map(w => w.totalSales);\n  const mean = baselineSales.reduce((a, b) => a + b, 0) / baselineSales.length;\n  const variance = baselineSales.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / baselineSales.length;\n  const stdDev = Math.sqrt(variance);\n\n  const zScore = stdDev === 0 ? 0 : (currentWeekData.totalSales - mean) / stdDev;\n  const isAnomaly = Math.abs(zScore) > 2;\n\n  results.push({\n    region,\n    weekKey: currentWeek,\n    totalSales: currentWeekData.totalSales,\n    uniqueCustomers: currentWeekData.uniqueCustomers,\n    orderCount: currentWeekData.orderCount,\n    baselineMean: Math.round(mean * 100) / 100,\n    zScore: Math.round(zScore * 100) / 100,\n    isAnomaly,\n  });\n}\n\nreturn results.map(r => ({ json: r }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16,
+        -112
+      ],
+      "id": "a0580d61-ec35-4540-ac24-6a1b3ce93ca5",
+      "name": "Weekly KPI & Anomaly Detection"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3-flash-preview",
+          "mode": "list",
+          "cachedResultName": "models/gemini-3-flash-preview"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a senior business intelligence analyst writing a concise weekly executive summary for a retail Superstore business, based on the regional sales data below.\n\nData:\n{{ $json.reportData }}\n\nWrite a professional, concise executive summary with this structure:\n1. A one-line headline insight — the single most important thing happening this week\n2. Key numbers — 3 to 4 bullet points covering the most relevant regional performance\n3. Anomalies — explain in plain English any region flagged as an anomaly, what the z-score means in simple terms, and why it matters. If nothing is flagged, say performance is within normal range and briefly note the standout region (highest or lowest)\n4. One recommended next action for the business based on this data\n\nKeep the tone professional but conversational, suitable for a non-technical business executive. Do not use markdown headers — just clear paragraph breaks and bullet points. Keep the whole summary under 200 words."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        352,
+        -112
+      ],
+      "id": "10717099-696f-4e93-a14c-bafa6a16e94b",
+      "name": "Generate Executive Summary",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "Uzsbl5LJGPsWMK1e",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Format Data For AI\n// Combines the 4 region rows into one clean text block for the Gemini prompt\n// ============================================================\n\nconst items = $input.all().map(item => item.json);\n\nconst weekLabel = items[0] ? items[0].weekKey : 'this week';\n\nconst summaryLines = items.map(r => {\n  const anomalyFlag = r.isAnomaly ? ' [ANOMALY FLAGGED]' : '';\n  const baseline = (r.baselineMean !== null && r.baselineMean !== undefined)\n    ? `$${r.baselineMean}`\n    : 'N/A (not enough history)';\n  const z = (r.zScore !== null && r.zScore !== undefined) ? r.zScore : 'N/A';\n\n  return `- ${r.region}: Sales $${r.totalSales}, Unique Customers ${r.uniqueCustomers}, Orders ${r.orderCount}, Baseline Avg Sales ${baseline}, Z-Score ${z}${anomalyFlag}`;\n}).join('\\n');\n\nconst reportData = `Week: ${weekLabel}\\n\\nRegional Performance:\\n${summaryLines}`;\n\nreturn [{ json: { weekLabel, reportData, regions: items } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        -112
+      ],
+      "id": "9f6ca585-a9e2-43db-93c6-1cdfd06cef12",
+      "name": "Format Data For AI"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Build Email & Chart\n// Combines Gemini's summary text with a QuickChart bar chart into final HTML\n// ============================================================\n\n// Gemini's generated summary text (from the node right before this one)\n   const summaryText = $json.content.parts[0].text || 'Summary unavailable';\n\n// Pull the raw per-region numbers from the earlier \"Format Data For AI\" node\nconst regions = $('Format Data For AI').item.json.regions;\nconst weekLabel = $('Format Data For AI').item.json.weekLabel;\n\n// Build a QuickChart.io bar chart config - red bars for flagged anomalies\nconst chartConfig = {\n  type: 'bar',\n  data: {\n    labels: regions.map(r => r.region),\n    datasets: [{\n      label: 'Sales ($)',\n      data: regions.map(r => r.totalSales),\n      backgroundColor: regions.map(r => (r.isAnomaly ? '#e74c3c' : '#3498db'))\n    }]\n  },\n  options: {\n    plugins: {\n      title: { display: true, text: `Regional Sales - Week ${weekLabel}` }\n    }\n  }\n};\n\nconst chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}`;\n\n// Build the final HTML email body\nconst html = `\n<div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: auto;\">\n  <h2 style=\"color:#2c3e50;\">Weekly MIS Report - ${weekLabel}</h2>\n  <img src=\"${chartUrl}\" alt=\"Regional Sales Chart\" style=\"width:100%; max-width:600px;\" />\n  <div style=\"white-space: pre-line; line-height:1.5; color:#34495e; margin-top:20px;\">\n${summaryText}\n  </div>\n  <p style=\"font-size:12px; color:#999; margin-top:30px;\">Automated report generated by n8n + Gemini AI</p>\n</div>\n`;\n\n   const anomalyCount = regions.filter(r => r.isAnomaly).length;\n   return [{ json: { html, weekLabel, chartUrl, summaryText, anomalyCount } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        -112
+      ],
+      "id": "2df5341f-a74b-43ce-80b6-21e8eb16f5fc",
+      "name": "Build Email & Chart"
+    },
+    {
+      "parameters": {
+        "fromEmail": "jyoedu.777@gmail.com",
+        "toEmail": "jyoedu.777@gmail.com",
+        "subject": "=Weekly MIS Report - {{ $json.weekLabel }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        624,
+        112
+      ],
+      "id": "8978148c-6e9f-45b0-b1f0-ed3e9e57f57e",
+      "name": "Send Weekly Report",
+      "webhookId": "cac5c668-f95b-4dec-8f50-81a7aea6e52a",
+      "credentials": {
+        "smtp": {
+          "id": "t0LlaVZ4aYHQlell",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -464,
+        -176
+      ],
+      "id": "fa88d63c-2676-45a7-97fd-ff6cf6ecae7e",
+      "name": "Weekly Trigger"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "report_log",
+          "mode": "list",
+          "cachedResultName": "report_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "week_label": "={{ $('Build Email & Chart').item.json.weekLabel }}",
+            "summary_text": "={{ $('Build Email & Chart').item.json.summaryText }}",
+            "anomaly_count": "={{ $('Build Email & Chart').item.json.anomalyCount }}",
+            "status": "success"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "run_timestamp",
+              "displayName": "run_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "week_label",
+              "displayName": "week_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "summary_text",
+              "displayName": "summary_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "anomaly_count",
+              "displayName": "anomaly_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        848,
+        112
+      ],
+      "id": "46013db1-02fe-4070-98f1-f578bf35d3b1",
+      "name": "Log Report Run",
+      "credentials": {
+        "postgres": {
+          "id": "vgXolrS5p0W6qb4M",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Fetch Superstore Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Superstore Data": {
+      "main": [
+        [
+          {
+            "node": "Weekly KPI & Anomaly Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly KPI & Anomaly Detection": {
+      "main": [
+        [
+          {
+            "node": "Format Data For AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Data For AI": {
+      "main": [
+        [
+          {
+            "node": "Generate Executive Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Executive Summary": {
+      "main": [
+        [
+          {
+            "node": "Build Email & Chart",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email & Chart": {
+      "main": [
+        [
+          {
+            "node": "Send Weekly Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Superstore Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Weekly Report": {
+      "main": [
+        [
+          {
+            "node": "Log Report Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "qddN62Z1QQ45XHmB",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "6ad6326a-ac33-4a63-8cf4-44985303918c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "70bdd6638a2d9fc4d63058c22cc5794ad78044cd08714ac6257c9d5bccc08921"
+  },
+  "nodeGroups": [],
+  "id": "c8mZdiAwkoAA7LnC",
+  "tags": []
+}

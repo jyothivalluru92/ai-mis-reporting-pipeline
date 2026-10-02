@@ -1,0 +1,127 @@
+{
+  "name": "AI Data Query Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        -448,
+        -48
+      ],
+      "id": "0ea80423-81ee-4ac7-8352-777f82dd4e4b",
+      "name": "When chat message received",
+      "webhookId": "57fd8b9a-2d1b-4133-962b-ef2516d7c335"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -96,
+        -176
+      ],
+      "id": "657ead6d-d969-49d5-a062-ed230d537247",
+      "name": "Database Q&A Agent"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -128,
+        80
+      ],
+      "id": "f3372d07-ccb6-4bd6-81ed-89fd36219724",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "Uzsbl5LJGPsWMK1e",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Runs a SQL SELECT query against the superstore_sales table to answer questions about sales, customers, regions, categories, or orders.",
+        "operation": "executeQuery",
+        "query": "{{ $fromAI('query') }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.7,
+      "position": [
+        48,
+        64
+      ],
+      "id": "b44aaea3-7169-46e6-97c2-1b8f2ba7a46c",
+      "name": " Query Superstore Data",
+      "credentials": {
+        "postgres": {
+          "id": "OhoHXy5qZoTTWreV",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Database Q&A Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Database Q&A Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    " Query Superstore Data": {
+      "ai_tool": [
+        [
+          {
+            "node": "Database Q&A Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "qddN62Z1QQ45XHmB",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "8d23eaee-2065-4fb0-a0fe-57549282ed46",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "70bdd6638a2d9fc4d63058c22cc5794ad78044cd08714ac6257c9d5bccc08921"
+  },
+  "nodeGroups": [],
+  "id": "gk1suEi7Rfkz56lq",
+  "tags": []
+}

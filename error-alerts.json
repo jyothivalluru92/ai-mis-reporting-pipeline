@@ -1,0 +1,67 @@
+{
+  "name": "MIS Pipeline - Error Alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "920e288c-2c10-43c4-b606-22b8ad8a2988",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "fromEmail": "jyoedu.777@gmail.com",
+        "toEmail": "jyoedu.777@gmail.com",
+        "subject": "⚠️ MIS Pipeline Failed",
+        "emailFormat": "=     Workflow \"{{ $json.workflow.name }}\" failed.\n     \n     Failed node: {{ $json.execution.lastNodeExecuted }}\n     Error: {{ $json.execution.error.message }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        0
+      ],
+      "id": "f4b4009c-2a4e-4f14-b27f-e78558254746",
+      "name": "Send an Email",
+      "webhookId": "d4f65cb3-038c-48de-bf9c-a31637effde9",
+      "credentials": {
+        "smtp": {
+          "id": "t0LlaVZ4aYHQlell",
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send an Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "a982bebe-0ea3-4dc9-a630-96ba7cdd1523",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "70bdd6638a2d9fc4d63058c22cc5794ad78044cd08714ac6257c9d5bccc08921"
+  },
+  "nodeGroups": [],
+  "id": "qddN62Z1QQ45XHmB",
+  "tags": []
+}
